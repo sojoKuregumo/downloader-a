@@ -1,12 +1,15 @@
 #!/usr/bin/env bash
 set -e
 set -u
+set -x  # 🚨 ENABLE DEBUG LOGS (Prints everything to Render logs)
 
-# --- RENDER COMPATIBLE SETUP ---
+# --- 1. SETUP TOOLS (Formerly set_var) ---
+# We define these globally so they run immediately
 _CURL="$(command -v curl)"
 _JQ="$(command -v jq)"
 _NODE="$(command -v node)"
 _FFMPEG="$(command -v ffmpeg)"
+_FZF="$(command -v fzf)" # Not used interactively, but script might check it
 
 _HOST="https://animepahe.si"
 _ANIME_URL="$_HOST/anime"
@@ -20,7 +23,8 @@ _SOURCE_FILE=".source.json"
 
 mkdir -p "$_DOWNLOAD_DIR"
 
-# --- ARGUMENT PARSING ---
+# --- 2. FUNCTIONS ---
+
 set_args() {
     _PARALLEL_JOBS=1
     while getopts ":hlda:s:e:r:t:o:" opt; do
@@ -32,7 +36,7 @@ set_args() {
             r) _ANIME_RESOLUTION="$OPTARG" ;;
             t) _PARALLEL_JOBS="$OPTARG" ;;
             o) _ANIME_AUDIO="$OPTARG" ;;
-            d) _DEBUG_MODE=true; set -x ;;
+            d) set -x ;; # Already enabled at top, but keeps compatibility
             h) usage ;;
             \?) echo "Invalid option: -$OPTARG" >&2; exit 1 ;;
         esac
@@ -69,7 +73,9 @@ get_episode_list() { get "${_API_URL}?m=release&id=${1}&sort=episode_asc&page=${
 
 download_source() {
     local d p n
+    # Make a specific folder for the anime inside downloads
     mkdir -p "$_DOWNLOAD_DIR/$_ANIME_NAME"
+    
     d="$(get_episode_list "$_ANIME_SLUG" "1")"
     p="$("$_JQ" -r '.last_page' <<< "$d")"
 
@@ -84,6 +90,7 @@ download_source() {
 
 get_episode_link() {
     local s o l r=""
+    # Point to the source file inside the download directory
     s=$("$_JQ" -r '.data[] | select((.episode | tonumber) == ($num | tonumber)) | .session' --arg num "$1" < "$_DOWNLOAD_DIR/$_ANIME_NAME/$_SOURCE_FILE")
     [[ "$s" == "" ]] && print_warn "Episode $1 not found!" && return
     o="$("$_CURL" --compressed -sSL -H "cookie: $_COOKIE" "${_HOST}/play/${_ANIME_SLUG}/${s}")"
@@ -186,6 +193,7 @@ decrypt_segments() {
 
 download_episode() {
     local num="$1" l pl v erropt='' extpicky=''
+    # Save video inside the anime specific folder to keep things organized
     v="$_DOWNLOAD_DIR/${_ANIME_NAME}/${num}.mp4"
 
     l=$(get_episode_link "$num")
@@ -229,22 +237,21 @@ get_slug_from_name() { grep "] $1" "$_ANIME_LIST_FILE" | tail -1 | remove_bracke
 
 main() {
     set_args "$@"
-    set_var
+    # set_var  <-- REMOVED THIS (Causes error because we already set vars at top)
     set_cookie
 
     if [[ -n "${_INPUT_ANIME_NAME:-}" ]]; then
-        # 🚨 FIX: Replaced interactive FZF with 'head -n 1' to Auto-Select first result
+        # AUTO SELECT FIRST RESULT (Fixes "Headless" issue)
         search_res=$(search_anime_by_name "$_INPUT_ANIME_NAME")
         if [[ -z "$search_res" ]]; then
             print_error "Anime not found!"
         fi
-        # AUTO SELECT THE FIRST RESULT
         _ANIME_NAME=$(head -n 1 <<< "$search_res")
         _ANIME_SLUG="$(get_slug_from_name "$_ANIME_NAME")"
     else
         download_anime_list
         if [[ -z "${_ANIME_SLUG:-}" ]]; then
-             # AUTO SELECT FIRST FROM LIST
+            # AUTO SELECT FIRST FROM LIST
             _ANIME_NAME=$(head -n 1 <<< "$(remove_slug < "$_ANIME_LIST_FILE")")
             _ANIME_SLUG="$(get_slug_from_name "$_ANIME_NAME")"
         fi
@@ -260,7 +267,7 @@ main() {
     download_source
     
     if [[ -z "${_ANIME_EPISODE:-}" ]]; then
-        print_error "You must specify episode with -e (Interactive menu disabled)"
+        print_error "You must specify episode with -e (Menu is disabled on Render)"
     fi
     
     download_episodes "$_ANIME_EPISODE"
