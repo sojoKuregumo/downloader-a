@@ -1,67 +1,27 @@
 #!/usr/bin/env bash
-#
-# Download anime from animepahe in terminal
-#
-#/ Usage:
-#/   ./animepahe-dl.sh [-a <anime name>] [-s <anime_slug>] [-e <episode_num1,num2,num3-num4...>] [-r <resolution>] [-t <num>] [-l] [-d]
-#/
-#/ Options:
-#/   -a <name>               anime name
-#/   -s <slug>               anime slug/uuid, can be found in $_ANIME_LIST_FILE
-#/                           ignored when "-a" is enabled
-#/   -e <num1,num3-num4...>  optional, episode number to download
-#/                           multiple episode numbers seperated by ","
-#/                           episode range using "-"
-#/                           all episodes using "*"
-#/   -r <resolution>         optional, specify resolution: "1080", "720"...
-#/                           by default, the highest resolution is selected
-#/   -o <language>           optional, specify audio language: "eng", "jpn"...
-#/   -t <num>                optional, specify a positive integer as num of threads
-#/   -l                      optional, show m3u8 playlist link without downloading videos
-#/   -d                      enable debug mode
-#/   -h | --help             display this help message
-
 set -e
 set -u
 
-usage() {
-    printf "%b\n" "$(grep '^#/' "$0" | cut -c4-)" && exit 1
-}
+# --- RENDER COMPATIBLE SETUP ---
+_CURL="$(command -v curl)"
+_JQ="$(command -v jq)"
+_NODE="$(command -v node)"
+_FFMPEG="$(command -v ffmpeg)"
 
-set_var() {
-    # UPDATED FOR RENDER: Uses command -v to find tools in local bin/
-    _CURL="$(command -v curl)" || command_not_found "curl"
-    _JQ="$(command -v jq)" || command_not_found "jq"
-    _FZF="$(command -v fzf)" || command_not_found "fzf"
-    
-    if [[ -z ${ANIMEPAHE_DL_NODE:-} ]]; then
-        _NODE="$(command -v node)" || command_not_found "node"
-    else
-        _NODE="$ANIMEPAHE_DL_NODE"
-    fi
-    
-    _FFMPEG="$(command -v ffmpeg)" || command_not_found "ffmpeg"
-    
-    if [[ ${_PARALLEL_JOBS:-} -gt 1 ]]; then
-       _OPENSSL="$(command -v openssl)" || command_not_found "openssl"
-    fi
+_HOST="https://animepahe.si"
+_ANIME_URL="$_HOST/anime"
+_API_URL="$_HOST/api"
+_REFERER_URL="https://kwik.cx/"
 
-    _HOST="https://animepahe.si"
-    _ANIME_URL="$_HOST/anime"
-    _API_URL="$_HOST/api"
-    _REFERER_URL="https://kwik.cx/"
+_SCRIPT_PATH=$(dirname "$(realpath "$0")")
+_DOWNLOAD_DIR="$_SCRIPT_PATH/downloads"
+_ANIME_LIST_FILE="$_SCRIPT_PATH/anime.list"
+_SOURCE_FILE=".source.json"
 
-    _SCRIPT_PATH=$(dirname "$(realpath "$0")")
-    # Ensure Downloads go to a specific folder so Bot can find them
-    _DOWNLOAD_DIR="$_SCRIPT_PATH/downloads"
-    mkdir -p "$_DOWNLOAD_DIR"
-    
-    _ANIME_LIST_FILE="$_SCRIPT_PATH/anime.list"
-    _SOURCE_FILE=".source.json"
-}
+mkdir -p "$_DOWNLOAD_DIR"
 
+# --- ARGUMENT PARSING ---
 set_args() {
-    expr "$*" : ".*--help" > /dev/null && usage
     _PARALLEL_JOBS=1
     while getopts ":hlda:s:e:r:t:o:" opt; do
         case $opt in
@@ -70,22 +30,18 @@ set_args() {
             e) _ANIME_EPISODE="$OPTARG" ;;
             l) _LIST_LINK_ONLY=true ;;
             r) _ANIME_RESOLUTION="$OPTARG" ;;
-            t) _PARALLEL_JOBS="$OPTARG"
-               if [[ ! "$_PARALLEL_JOBS" =~ ^[0-9]+$ || "$_PARALLEL_JOBS" -eq 0 ]]; then
-                   print_error "-t <num>: Number must be a positive integer"
-               fi ;;
+            t) _PARALLEL_JOBS="$OPTARG" ;;
             o) _ANIME_AUDIO="$OPTARG" ;;
             d) _DEBUG_MODE=true; set -x ;;
             h) usage ;;
-            \?) print_error "Invalid option: -$OPTARG" ;;
+            \?) echo "Invalid option: -$OPTARG" >&2; exit 1 ;;
         esac
     done
 }
 
-print_info() { [[ -z "${_LIST_LINK_ONLY:-}" ]] && printf "%b\n" "\033[32m[INFO]\033[0m $1" >&2; }
-print_warn() { [[ -z "${_LIST_LINK_ONLY:-}" ]] && printf "%b\n" "\033[33m[WARNING]\033[0m $1" >&2; }
-print_error() { printf "%b\n" "\033[31m[ERROR]\033[0m $1" >&2; exit 1; }
-command_not_found() { print_error "$1 command not found!"; }
+print_info() { [[ -z "${_LIST_LINK_ONLY:-}" ]] && echo "[INFO] $1" >&2; }
+print_warn() { [[ -z "${_LIST_LINK_ONLY:-}" ]] && echo "[WARNING] $1" >&2; }
+print_error() { echo "[ERROR] $1" >&2; exit 1; }
 
 get() { "$_CURL" -sS -L "$1" -H "cookie: $_COOKIE" --compressed; }
 
@@ -113,7 +69,6 @@ get_episode_list() { get "${_API_URL}?m=release&id=${1}&sort=episode_asc&page=${
 
 download_source() {
     local d p n
-    # MODIFIED: Output to downloads folder
     mkdir -p "$_DOWNLOAD_DIR/$_ANIME_NAME"
     d="$(get_episode_list "$_ANIME_SLUG" "1")"
     p="$("$_JQ" -r '.last_page' <<< "$d")"
@@ -133,12 +88,6 @@ get_episode_link() {
     [[ "$s" == "" ]] && print_warn "Episode $1 not found!" && return
     o="$("$_CURL" --compressed -sSL -H "cookie: $_COOKIE" "${_HOST}/play/${_ANIME_SLUG}/${s}")"
     l="$(grep \<button <<< "$o" | grep data-src | sed -E 's/data-src="/\n/g' | grep 'data-av1="0"')"
-
-    if [[ -n "${_ANIME_AUDIO:-}" ]]; then
-        print_info "Select audio language: $_ANIME_AUDIO"
-        r="$(grep 'data-audio="'"$_ANIME_AUDIO"'"' <<< "$l")"
-        [[ -z "${r:-}" ]] && print_warn "Selected audio language is not available, fallback to default."
-    fi
 
     if [[ -n "${_ANIME_RESOLUTION:-}" ]]; then
         print_info "Select video resolution: $_ANIME_RESOLUTION"
@@ -237,7 +186,6 @@ decrypt_segments() {
 
 download_episode() {
     local num="$1" l pl v erropt='' extpicky=''
-    # MODIFIED: Output to downloads folder
     v="$_DOWNLOAD_DIR/${_ANIME_NAME}/${num}.mp4"
 
     l=$(get_episode_link "$num")
@@ -275,14 +223,6 @@ download_episode() {
     fi
 }
 
-select_episodes_to_download() {
-    [[ "$(grep 'data' -c "$_DOWNLOAD_DIR/$_ANIME_NAME/$_SOURCE_FILE")" -eq "0" ]] && print_error "No episode available!"
-    "$_JQ" -r '.data[] | "[\(.episode | tonumber)] E\(.episode | tonumber) \(.created_at)"' "$_DOWNLOAD_DIR/$_ANIME_NAME/$_SOURCE_FILE" >&2
-    echo -n "Which episode(s) to download: " >&2
-    read -r s
-    echo "$s"
-}
-
 remove_brackets() { awk -F']' '{print $1}' | sed -E 's/^\[//'; }
 remove_slug() { awk -F'] ' '{print $2}'; }
 get_slug_from_name() { grep "] $1" "$_ANIME_LIST_FILE" | tail -1 | remove_brackets; }
@@ -293,12 +233,19 @@ main() {
     set_cookie
 
     if [[ -n "${_INPUT_ANIME_NAME:-}" ]]; then
-        _ANIME_NAME=$("$_FZF" -1 <<< "$(search_anime_by_name "$_INPUT_ANIME_NAME")")
+        # 🚨 FIX: Replaced interactive FZF with 'head -n 1' to Auto-Select first result
+        search_res=$(search_anime_by_name "$_INPUT_ANIME_NAME")
+        if [[ -z "$search_res" ]]; then
+            print_error "Anime not found!"
+        fi
+        # AUTO SELECT THE FIRST RESULT
+        _ANIME_NAME=$(head -n 1 <<< "$search_res")
         _ANIME_SLUG="$(get_slug_from_name "$_ANIME_NAME")"
     else
         download_anime_list
         if [[ -z "${_ANIME_SLUG:-}" ]]; then
-            _ANIME_NAME=$("$_FZF" -1 <<< "$(remove_slug < "$_ANIME_LIST_FILE")")
+             # AUTO SELECT FIRST FROM LIST
+            _ANIME_NAME=$(head -n 1 <<< "$(remove_slug < "$_ANIME_LIST_FILE")")
             _ANIME_SLUG="$(get_slug_from_name "$_ANIME_NAME")"
         fi
     fi
@@ -307,13 +254,15 @@ main() {
     _ANIME_NAME="$(grep "$_ANIME_SLUG" "$_ANIME_LIST_FILE" | tail -1 | remove_slug | sed -E 's/[[:space:]]+$//' | sed -E 's/[^[:alnum:] ,\+\-\)\(]/_/g')"
 
     if [[ "$_ANIME_NAME" == "" ]]; then
-        print_warn "Anime name not found! Try again."
-        download_anime_list
-        exit 1
+        print_error "Anime name not found!"
     fi
 
     download_source
-    [[ -z "${_ANIME_EPISODE:-}" ]] && _ANIME_EPISODE=$(select_episodes_to_download)
+    
+    if [[ -z "${_ANIME_EPISODE:-}" ]]; then
+        print_error "You must specify episode with -e (Interactive menu disabled)"
+    fi
+    
     download_episodes "$_ANIME_EPISODE"
 }
 
