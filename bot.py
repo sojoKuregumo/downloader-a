@@ -12,22 +12,20 @@ API_HASH = os.environ.get("API_HASH", "")
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
 MAIN_CHANNEL_ID = int(os.environ.get("MAIN_CHANNEL_ID", "0"))
 
-# --- PATH SETUP ---
+# --- PATH SETUP (CRITICAL) ---
 BASE_DIR = os.getcwd()
 BIN_DIR = os.path.join(BASE_DIR, "bin")
 DOWNLOAD_DIR = os.path.join(BASE_DIR, "downloads")
 SCRIPT_PATH = os.path.join(BASE_DIR, "animepahe-dl.sh")
 
-# 🚨 CRITICAL: Add bin to PATH so bash script finds node/ffmpeg/jq
+# Tell the system where our tools are
 os.environ["PATH"] = BIN_DIR + os.pathsep + os.environ["PATH"]
 
 logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger("Bot")
-
 app = Client("render_direct", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 ACTIVE_TASKS = {}
 
-# --- WEB SERVER (To keep Render alive) ---
+# --- WEB SERVER (Keeps Render Alive) ---
 async def web_server():
     async def handle(request): return web.Response(text="Bot Running")
     webapp = web.Application()
@@ -38,27 +36,24 @@ async def web_server():
     site = web.TCPSite(runner, "0.0.0.0", port)
     await site.start()
 
-# --- COMMAND HANDLER ---
+# --- COMMAND ---
 @app.on_message(filters.command("dl"))
 async def download_handler(client, message):
-    chat_id = message.chat.id
-    if chat_id in ACTIVE_TASKS:
-        return await message.reply("⚠️ Busy! One download at a time.")
+    if message.chat.id in ACTIVE_TASKS:
+        return await message.reply("⚠️ Busy! Wait for current download.")
     
-    # Parse: /dl -a "Naruto" -e 1
     cmd_args = message.text[4:].strip()
     if not cmd_args: return await message.reply("Usage: `/dl -a \"Name\" -e 1`")
 
-    ACTIVE_TASKS[chat_id] = True
-    status = await message.reply(f"⬇️ **Starting Job...**")
+    ACTIVE_TASKS[message.chat.id] = True
+    status = await message.reply(f"⬇️ **Starting...**")
 
     # Clean previous files
     if os.path.exists(DOWNLOAD_DIR): shutil.rmtree(DOWNLOAD_DIR)
     os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 
     try:
-        # Run Bash Script
-        # We pass -r 1080 to force resolution and avoid menus
+        # Run Script (Force 1080p)
         full_cmd = f"bash {SCRIPT_PATH} {cmd_args} -r 1080"
         
         process = await asyncio.create_subprocess_shell(
@@ -67,11 +62,11 @@ async def download_handler(client, message):
             stderr=asyncio.subprocess.PIPE
         )
         
-        await status.edit("⬇️ **Downloading... (This may take a moment)**")
+        await status.edit("⬇️ **Downloading... (Please Wait)**")
         stdout, stderr = await process.communicate()
         
-        # Find MP4
-        files = glob.glob(f"{DOWNLOAD_DIR}/**/*.mp4", recursive=True) # Script creates subfolders
+        # Find the video file
+        files = glob.glob(f"{DOWNLOAD_DIR}/**/*.mp4", recursive=True)
         
         if files:
             file_path = files[0]
@@ -79,7 +74,7 @@ async def download_handler(client, message):
             
             await status.edit(f"🚀 **Uploading:** `{filename}`")
             
-            # Upload
+            # Upload directly to channel
             await client.send_document(
                 MAIN_CHANNEL_ID,
                 document=file_path,
@@ -88,16 +83,19 @@ async def download_handler(client, message):
             )
             
             await status.edit("✅ **Done!**")
-            os.remove(file_path) # Delete immediately
+            os.remove(file_path) # Delete immediately to free space
         else:
-            # Error Handling
-            log = stderr.decode().strip()[-600:] # Get last lines of error
-            await status.edit(f"❌ **Failed.**\n\n`{log}`")
+            # Send logs if failed
+            log = stderr.decode().strip()[-800:] 
+            if not log: log = stdout.decode().strip()[-800:]
+            await status.edit(f"❌ **Download Failed.**\n\nLogs:\n`{log}`")
 
     except Exception as e:
         await status.edit(f"❌ Error: {e}")
 
-    ACTIVE_TASKS.pop(chat_id, None)
+    # Cleanup
+    if os.path.exists(DOWNLOAD_DIR): shutil.rmtree(DOWNLOAD_DIR)
+    ACTIVE_TASKS.pop(message.chat.id, None)
 
 if __name__ == "__main__":
     loop = asyncio.get_event_loop()
