@@ -1,15 +1,12 @@
 #!/usr/bin/env bash
 set -e
 set -u
-set -x  # 🚨 ENABLE DEBUG LOGS (Prints everything to Render logs)
 
-# --- 1. SETUP TOOLS (Formerly set_var) ---
-# We define these globally so they run immediately
+# --- RENDER COMPATIBLE SETUP ---
 _CURL="$(command -v curl)"
 _JQ="$(command -v jq)"
 _NODE="$(command -v node)"
 _FFMPEG="$(command -v ffmpeg)"
-_FZF="$(command -v fzf)" # Not used interactively, but script might check it
 
 _HOST="https://animepahe.si"
 _ANIME_URL="$_HOST/anime"
@@ -23,7 +20,10 @@ _SOURCE_FILE=".source.json"
 
 mkdir -p "$_DOWNLOAD_DIR"
 
-# --- 2. FUNCTIONS ---
+# --- 1. USER AGENT SPOOFING (The Fix) ---
+_USER_AGENT="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+
+# --- FUNCTIONS ---
 
 set_args() {
     _PARALLEL_JOBS=1
@@ -36,7 +36,7 @@ set_args() {
             r) _ANIME_RESOLUTION="$OPTARG" ;;
             t) _PARALLEL_JOBS="$OPTARG" ;;
             o) _ANIME_AUDIO="$OPTARG" ;;
-            d) set -x ;; # Already enabled at top, but keeps compatibility
+            d) set -x ;;
             h) usage ;;
             \?) echo "Invalid option: -$OPTARG" >&2; exit 1 ;;
         esac
@@ -47,7 +47,14 @@ print_info() { [[ -z "${_LIST_LINK_ONLY:-}" ]] && echo "[INFO] $1" >&2; }
 print_warn() { [[ -z "${_LIST_LINK_ONLY:-}" ]] && echo "[WARNING] $1" >&2; }
 print_error() { echo "[ERROR] $1" >&2; exit 1; }
 
-get() { "$_CURL" -sS -L "$1" -H "cookie: $_COOKIE" --compressed; }
+# UPDATED GET FUNCTION (Passes Headers)
+get() { 
+    "$_CURL" -sS -L "$1" \
+    -H "User-Agent: $_USER_AGENT" \
+    -H "Referer: $_HOST" \
+    -H "cookie: $_COOKIE" \
+    --compressed
+}
 
 set_cookie() {
     local u; u="$(LC_ALL=C tr -dc 'a-zA-Z0-9' < /dev/urandom | head -c 16)"
@@ -73,9 +80,7 @@ get_episode_list() { get "${_API_URL}?m=release&id=${1}&sort=episode_asc&page=${
 
 download_source() {
     local d p n
-    # Make a specific folder for the anime inside downloads
     mkdir -p "$_DOWNLOAD_DIR/$_ANIME_NAME"
-    
     d="$(get_episode_list "$_ANIME_SLUG" "1")"
     p="$("$_JQ" -r '.last_page' <<< "$d")"
 
@@ -90,10 +95,11 @@ download_source() {
 
 get_episode_link() {
     local s o l r=""
-    # Point to the source file inside the download directory
     s=$("$_JQ" -r '.data[] | select((.episode | tonumber) == ($num | tonumber)) | .session' --arg num "$1" < "$_DOWNLOAD_DIR/$_ANIME_NAME/$_SOURCE_FILE")
     [[ "$s" == "" ]] && print_warn "Episode $1 not found!" && return
-    o="$("$_CURL" --compressed -sSL -H "cookie: $_COOKIE" "${_HOST}/play/${_ANIME_SLUG}/${s}")"
+    
+    # Fetch player page
+    o="$("$_CURL" --compressed -sSL -H "User-Agent: $_USER_AGENT" -H "Referer: $_HOST" -H "cookie: $_COOKIE" "${_HOST}/play/${_ANIME_SLUG}/${s}")"
     l="$(grep \<button <<< "$o" | grep data-src | sed -E 's/data-src="/\n/g' | grep 'data-av1="0"')"
 
     if [[ -n "${_ANIME_RESOLUTION:-}" ]]; then
@@ -111,8 +117,31 @@ get_episode_link() {
 
 get_playlist_link() {
     local s l
-    s="$("$_CURL" --compressed -sS -H "Referer: $_REFERER_URL" -H "cookie: $_COOKIE" "$1" | grep "<script>eval(" | awk -F 'script>' '{print $2}'| sed -E 's/document/process/g' | sed -E 's/querySelector/exit/g' | sed -E 's/eval\(/console.log\(/g')"
-    l="$("$_NODE" -e "$s" | grep 'source=' | sed -E "s/.m3u8';.*/.m3u8/" | sed -E "s/.*const source='//")"
+    # 🚨 UPDATED EXTRACTION LOGIC 🚨
+    # 1. Fetch Kwik Page pretending to be Chrome
+    s="$("$_CURL" --compressed -sS \
+        -H "User-Agent: $_USER_AGENT" \
+        -H "Referer: $_REFERER_URL" \
+        -H "cookie: $_COOKIE" "$1")"
+    
+    # 2. Extract Javascript (More flexible grep)
+    # Extracts everything inside <script>...eval(...)...</script>
+    js_code=$(echo "$s" | grep -o "<script>.*eval(.*).*</script>" | sed -E 's/<script>//;s/<\/script>//')
+
+    # 3. Clean JS for Node execution
+    # Replace document/window calls with console.log so Node outputs the decoded URL
+    clean_js=$(echo "$js_code" | \
+        sed -E 's/document/process/g' | \
+        sed -E 's/querySelector/exit/g' | \
+        sed -E 's/eval\(/console.log\(/g')
+
+    if [[ -z "$clean_js" ]]; then
+        echo ""
+        return
+    fi
+
+    # 4. Run in Node to decrypt
+    l="$("$_NODE" -e "$clean_js" | grep 'source=' | sed -E "s/.m3u8';.*/.m3u8/" | sed -E "s/.*const source='//")"
     echo "$l"
 }
 
@@ -157,7 +186,13 @@ get_thread_number() {
 
 download_file() {
     local s
-    s=$("$_CURL" -k -sS -H "Referer: $_REFERER_URL" -H "cookie: $_COOKIE" -C - "$1" -L -g -o "$2" --connect-timeout 5 --compressed || echo "$?")
+    # Added User-Agent to download command too
+    s=$("$_CURL" -k -sS \
+        -H "User-Agent: $_USER_AGENT" \
+        -H "Referer: $_REFERER_URL" \
+        -H "cookie: $_COOKIE" \
+        -C - "$1" -L -g -o "$2" --connect-timeout 5 --compressed || echo "$?")
+        
     if [[ "$s" -ne 0 ]]; then
         print_warn "Download was aborted. Retry..."
         download_file "$1" "$2"
@@ -171,7 +206,7 @@ decrypt_file() {
 
 download_segments() {
     local op="$2"
-    export _CURL _REFERER_URL op
+    export _CURL _REFERER_URL _USER_AGENT _COOKIE op
     export -f download_file print_warn
     xargs -I {} -P "$(get_thread_number "$1")" bash -c 'url="{}"; file="${url##*/}.encrypted"; download_file "$url" "${op}/${file}"' < <(grep "^https" "$1")
 }
@@ -193,7 +228,6 @@ decrypt_segments() {
 
 download_episode() {
     local num="$1" l pl v erropt='' extpicky=''
-    # Save video inside the anime specific folder to keep things organized
     v="$_DOWNLOAD_DIR/${_ANIME_NAME}/${num}.mp4"
 
     l=$(get_episode_link "$num")
@@ -224,7 +258,7 @@ download_episode() {
             ! cd "$cpath" && print_warn "Cannot change directory to $cpath" && return
             [[ -z "${_DEBUG_MODE:-}" ]] && rm -rf "$opath" || return 0
         else
-            "$_FFMPEG" $extpicky -headers "Referer: $_REFERER_URL" -i "$pl" -c copy $erropt -y "$v"
+            "$_FFMPEG" $extpicky -headers "Referer: $_REFERER_URL" -headers "User-Agent: $_USER_AGENT" -i "$pl" -c copy $erropt -y "$v"
         fi
     else
         echo "$pl"
@@ -237,11 +271,9 @@ get_slug_from_name() { grep "] $1" "$_ANIME_LIST_FILE" | tail -1 | remove_bracke
 
 main() {
     set_args "$@"
-    # set_var  <-- REMOVED THIS (Causes error because we already set vars at top)
     set_cookie
 
     if [[ -n "${_INPUT_ANIME_NAME:-}" ]]; then
-        # AUTO SELECT FIRST RESULT (Fixes "Headless" issue)
         search_res=$(search_anime_by_name "$_INPUT_ANIME_NAME")
         if [[ -z "$search_res" ]]; then
             print_error "Anime not found!"
@@ -251,7 +283,6 @@ main() {
     else
         download_anime_list
         if [[ -z "${_ANIME_SLUG:-}" ]]; then
-            # AUTO SELECT FIRST FROM LIST
             _ANIME_NAME=$(head -n 1 <<< "$(remove_slug < "$_ANIME_LIST_FILE")")
             _ANIME_SLUG="$(get_slug_from_name "$_ANIME_NAME")"
         fi
@@ -267,7 +298,7 @@ main() {
     download_source
     
     if [[ -z "${_ANIME_EPISODE:-}" ]]; then
-        print_error "You must specify episode with -e (Menu is disabled on Render)"
+        print_error "You must specify episode with -e"
     fi
     
     download_episodes "$_ANIME_EPISODE"
