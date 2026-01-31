@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 set -e
 set -u
+# set -x  <-- Debug mode off for now to keep logs clean
 
 # --- RENDER COMPATIBLE SETUP ---
 _CURL="$(command -v curl)"
@@ -20,7 +21,7 @@ _SOURCE_FILE=".source.json"
 
 mkdir -p "$_DOWNLOAD_DIR"
 
-# --- 1. USER AGENT SPOOFING (The Fix) ---
+# 🚨 THE FIX: Fake a real Browser
 _USER_AGENT="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 
 # --- FUNCTIONS ---
@@ -47,7 +48,7 @@ print_info() { [[ -z "${_LIST_LINK_ONLY:-}" ]] && echo "[INFO] $1" >&2; }
 print_warn() { [[ -z "${_LIST_LINK_ONLY:-}" ]] && echo "[WARNING] $1" >&2; }
 print_error() { echo "[ERROR] $1" >&2; exit 1; }
 
-# UPDATED GET FUNCTION (Passes Headers)
+# Updated GET to always use User-Agent
 get() { 
     "$_CURL" -sS -L "$1" \
     -H "User-Agent: $_USER_AGENT" \
@@ -98,7 +99,7 @@ get_episode_link() {
     s=$("$_JQ" -r '.data[] | select((.episode | tonumber) == ($num | tonumber)) | .session' --arg num "$1" < "$_DOWNLOAD_DIR/$_ANIME_NAME/$_SOURCE_FILE")
     [[ "$s" == "" ]] && print_warn "Episode $1 not found!" && return
     
-    # Fetch player page
+    # Use User-Agent here too
     o="$("$_CURL" --compressed -sSL -H "User-Agent: $_USER_AGENT" -H "Referer: $_HOST" -H "cookie: $_COOKIE" "${_HOST}/play/${_ANIME_SLUG}/${s}")"
     l="$(grep \<button <<< "$o" | grep data-src | sed -E 's/data-src="/\n/g' | grep 'data-av1="0"')"
 
@@ -117,19 +118,17 @@ get_episode_link() {
 
 get_playlist_link() {
     local s l
-    # 🚨 UPDATED EXTRACTION LOGIC 🚨
-    # 1. Fetch Kwik Page pretending to be Chrome
+    # 🚨 CRITICAL FIX: Added User-Agent to this CURL command
+    # This was failing before because Kwik blocked the request
     s="$("$_CURL" --compressed -sS \
         -H "User-Agent: $_USER_AGENT" \
         -H "Referer: $_REFERER_URL" \
         -H "cookie: $_COOKIE" "$1")"
     
-    # 2. Extract Javascript (More flexible grep)
-    # Extracts everything inside <script>...eval(...)...</script>
+    # Robust extraction of the obfuscated JS
     js_code=$(echo "$s" | grep -o "<script>.*eval(.*).*</script>" | sed -E 's/<script>//;s/<\/script>//')
 
-    # 3. Clean JS for Node execution
-    # Replace document/window calls with console.log so Node outputs the decoded URL
+    # Prepare JS for Node
     clean_js=$(echo "$js_code" | \
         sed -E 's/document/process/g' | \
         sed -E 's/querySelector/exit/g' | \
@@ -140,7 +139,6 @@ get_playlist_link() {
         return
     fi
 
-    # 4. Run in Node to decrypt
     l="$("$_NODE" -e "$clean_js" | grep 'source=' | sed -E "s/.m3u8';.*/.m3u8/" | sed -E "s/.*const source='//")"
     echo "$l"
 }
@@ -186,7 +184,7 @@ get_thread_number() {
 
 download_file() {
     local s
-    # Added User-Agent to download command too
+    # Added User-Agent here as well
     s=$("$_CURL" -k -sS \
         -H "User-Agent: $_USER_AGENT" \
         -H "Referer: $_REFERER_URL" \
