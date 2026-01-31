@@ -7,19 +7,19 @@ from aiohttp import web
 from pyrogram import Client, filters, idle
 
 # --- CONFIGURATION ---
-API_ID = int(os.environ.get("API_ID"))
-API_HASH = os.environ.get("API_HASH")
-BOT_TOKEN = os.environ.get("BOT_TOKEN")
-MAIN_CHANNEL_ID = int(os.environ.get("MAIN_CHANNEL_ID")) # Where to upload
+API_ID = int(os.environ.get("API_ID", "0"))
+API_HASH = os.environ.get("API_HASH", "")
+BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
+MAIN_CHANNEL_ID = int(os.environ.get("MAIN_CHANNEL_ID", "0"))
 
-# Setup Paths
+# --- PATH SETUP ---
 BASE_DIR = os.getcwd()
 BIN_DIR = os.path.join(BASE_DIR, "bin")
 DOWNLOAD_DIR = os.path.join(BASE_DIR, "downloads")
 SCRIPT_PATH = os.path.join(BASE_DIR, "animepahe-dl.sh")
 
-# Add our custom bin folder to system PATH so the script finds node/jq/ffmpeg
-os.environ["PATH"] += os.pathsep + BIN_DIR
+# 🚨 CRITICAL: Add bin to PATH so bash script finds node/ffmpeg/jq
+os.environ["PATH"] = BIN_DIR + os.pathsep + os.environ["PATH"]
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("Bot")
@@ -27,7 +27,7 @@ logger = logging.getLogger("Bot")
 app = Client("render_direct", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 ACTIVE_TASKS = {}
 
-# --- WEB SERVER (Keeps Render Awake) ---
+# --- WEB SERVER (To keep Render alive) ---
 async def web_server():
     async def handle(request): return web.Response(text="Bot Running")
     webapp = web.Application()
@@ -38,38 +38,40 @@ async def web_server():
     site = web.TCPSite(runner, "0.0.0.0", port)
     await site.start()
 
-# --- COMMAND ---
+# --- COMMAND HANDLER ---
 @app.on_message(filters.command("dl"))
 async def download_handler(client, message):
-    if message.chat.id in ACTIVE_TASKS:
-        return await message.reply("⚠️ Busy! Wait for current download.")
+    chat_id = message.chat.id
+    if chat_id in ACTIVE_TASKS:
+        return await message.reply("⚠️ Busy! One download at a time.")
     
     # Parse: /dl -a "Naruto" -e 1
-    cmd = message.text[4:].strip()
-    if not cmd: return await message.reply("Usage: `/dl -a \"Name\" -e 1`")
+    cmd_args = message.text[4:].strip()
+    if not cmd_args: return await message.reply("Usage: `/dl -a \"Name\" -e 1`")
 
-    ACTIVE_TASKS[message.chat.id] = True
-    status = await message.reply(f"⬇️ **Starting Download...**\n`{cmd}`")
+    ACTIVE_TASKS[chat_id] = True
+    status = await message.reply(f"⬇️ **Starting Job...**")
 
-    # Clear previous downloads to save space
+    # Clean previous files
     if os.path.exists(DOWNLOAD_DIR): shutil.rmtree(DOWNLOAD_DIR)
     os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 
     try:
-        # Run the bash script
-        # We use 'bash' explicitly
-        proc = await asyncio.create_subprocess_exec(
-            "bash", SCRIPT_PATH, *cmd.split(), "-r", "1080", # Force arguments
+        # Run Bash Script
+        # We pass -r 1080 to force resolution and avoid menus
+        full_cmd = f"bash {SCRIPT_PATH} {cmd_args} -r 1080"
+        
+        process = await asyncio.create_subprocess_shell(
+            full_cmd,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE
         )
         
-        # Stream logs (optional, simple wait here)
-        await status.edit("⬇️ **Downloading (Please Wait)...**")
-        stdout, stderr = await proc.communicate()
-
-        # Check for file
-        files = glob.glob(f"{DOWNLOAD_DIR}/**/*.mp4", recursive=True)
+        await status.edit("⬇️ **Downloading... (This may take a moment)**")
+        stdout, stderr = await process.communicate()
+        
+        # Find MP4
+        files = glob.glob(f"{DOWNLOAD_DIR}/**/*.mp4", recursive=True) # Script creates subfolders
         
         if files:
             file_path = files[0]
@@ -77,34 +79,30 @@ async def download_handler(client, message):
             
             await status.edit(f"🚀 **Uploading:** `{filename}`")
             
-            # Upload to Channel
+            # Upload
             await client.send_document(
                 MAIN_CHANNEL_ID,
                 document=file_path,
-                caption=f"**{filename}**\n\nUploaded by Bot",
+                caption=f"**{filename}**",
                 force_document=True
             )
             
             await status.edit("✅ **Done!**")
-            
-            # CLEANUP IMMEDIATELY
-            os.remove(file_path)
+            os.remove(file_path) # Delete immediately
         else:
-            # Send Error Log if no file
-            err_log = stderr.decode()[-500:] # Last 500 chars
-            await status.edit(f"❌ **Download Failed.**\nLogs:\n`{err_log}`")
+            # Error Handling
+            log = stderr.decode().strip()[-600:] # Get last lines of error
+            await status.edit(f"❌ **Failed.**\n\n`{log}`")
 
     except Exception as e:
         await status.edit(f"❌ Error: {e}")
-    
-    # Cleanup
-    if os.path.exists(DOWNLOAD_DIR): shutil.rmtree(DOWNLOAD_DIR)
-    ACTIVE_TASKS.pop(message.chat.id, None)
+
+    ACTIVE_TASKS.pop(chat_id, None)
 
 if __name__ == "__main__":
     loop = asyncio.get_event_loop()
     loop.create_task(web_server())
     app.start()
-    print("🤖 Direct Uploader Online")
+    print("🤖 Bot Online")
     idle()
     app.stop()
