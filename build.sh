@@ -1,14 +1,23 @@
 #!/usr/bin/env bash
 set -e
 
-echo "🔧 STARTING MASTER BUILD..."
+echo "🔧 STARTING BUILD..."
 
-# 1. INSTALL PYTHON LIBRARIES
+# --- 1. INSTALL PYTHON LIBRARIES ---
+echo "📦 Installing Python Dependencies..."
 pip install -r requirements.txt
 
-# 2. SETUP LOCAL BIN FOLDER
+# --- 2. INSTALL YT-DLP WITH IMPERSONATION ---
+echo "⬇️ Installing yt-dlp with Cloudflare bypass..."
+pip install -U yt-dlp
+# Install the impersonate dependency
+pip install brotli brotlicffi pycryptodomex
+
+# --- 3. SETUP LOCAL TOOLS ---
 mkdir -p bin
 export PATH=$PWD/bin:$PATH
+
+# ... rest of your existing build.sh code ...
 
 # 3. INSTALL NODE.JS
 if [ ! -f "bin/node" ]; then
