@@ -44,6 +44,10 @@ if [ ! -f "bin/fzf" ]; then
     tar -xf fzf-0.46.1-linux_amd64.tar.gz
     mv fzf bin/
     rm fzf-*.tar.gz
+# Install yt-dlp
+if ! command -v yt-dlp &> /dev/null; then
+    echo "⬇️ Installing yt-dlp..."
+    pip install yt-dlp
 fi
 
 # Permissions
