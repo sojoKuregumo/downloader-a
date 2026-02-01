@@ -1,0 +1,26 @@
+services:
+  - type: web
+    name: anime-dl-bot
+    env: python
+    buildCommand: chmod +x build.sh && ./build.sh
+    startCommand: python bot.py
+    envVars:
+      - key: API_ID
+        sync: false
+      - key: API_HASH
+        sync: false
+      - key: BOT_TOKEN
+        sync: false
+      - key: CHANNEL_1
+        value: ""
+        sync: false
+      - key: CHANNEL_2
+        value: ""
+        sync: false
+      - key: CHANNEL_3
+        value: ""
+        sync: false
+      - key: PORT
+        value: 8080
+    plan: free
+    autoDeploy: true
